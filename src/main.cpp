@@ -9,6 +9,8 @@
 #define SCK_PIN 32
 // GAIN 128,64,32
 #define GAIN 64
+#define GRAVITY 9.7832
+#define PRESCALE GRAVITY/1000
 
 HX711 scale(DT_PIN, SCK_PIN, GAIN);
 BluetoothSerial SerialBT;
@@ -61,28 +63,35 @@ void ATCommandTask(void *pvParameters)
           Serial.printf("Start Calibration\r\n");
         } else if (command.startsWith("SCALE=")) {
           String numStr = command.substring(command.indexOf('=')+1);
-          scale.set_scale(numStr.toFloat());
+          scale.set_scale(numStr.toDouble());
           scaleMode = SCALEMODE_UNIT;
+          preference.begin("HX711");
+          preference.putDouble("CAL", numStr.toDouble());
+          preference.end();
         }
         if (isReboot) ESP.restart();
       } else {
         state = -1;
       }
     }
-    vTaskDelay(100 / portTICK_PERIOD_MS);
+    vTaskDelay(300 / portTICK_PERIOD_MS);
   }
   vTaskDelete(NULL);
 }
 
 void SerialTask(void *pvParameters) {
+  double t,w;
   for(;;) {
     if (!useBluetooth) {
       if (scaleMode == SCALEMODE_VALUE) {
-        Serial.println(scale.get_value(10));
+        t = millis() / 1000.0;
+        w = scale.get_value(10);
+        Serial.printf("%.2lf %.0lf\n", t, w);
       } else {
-        Serial.println(scale.get_units(10));
+        t = millis() / 1000.0;
+        w = round(scale.get_units(10)*PRESCALE);
+        Serial.printf("%.2lf %.2lf\n", t, w);
       }
-      vTaskDelay(100 / portTICK_PERIOD_MS);
     } else {
       vTaskDelay(3000 / portTICK_PERIOD_MS);
     }
@@ -92,16 +101,19 @@ void SerialTask(void *pvParameters) {
 
 void BluetoothServerTask(void *pvParameters)
 {
+  double t,w;
   for (;;) {
     if (SerialBT.hasClient()) {
       useBluetooth = true;
       ledState = LED_ON;
-      SerialBT.printf("%.2lf %.2lf\n", scale.get_value(10), scale.get_units(10));
+      t = millis() / 1000.0;
+      w = round(scale.get_units(10)*PRESCALE);
+      SerialBT.printf("%.2lf %.2lf\n", t, w);
     } else {
       useBluetooth = false;
       if (ledState != LED_BLINK) ledState = LED_BLINK;
+      vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
-    vTaskDelay(100 / portTICK_PERIOD_MS);
   }
   vTaskDelete(NULL);
 }
@@ -118,7 +130,12 @@ extern "C" void app_main() {
   // https://www.random.org/cgi-bin/randbyte?nbytes=2&format=h
   preference.begin("HX711", true);
   String name = preference.getString("ID", "");
+  double cal = preference.getDouble("CAL", 10.31691);
   preference.end();
+  // set up weight calibration
+  scale.tare(200);
+  scale.set_scale(cal);
+  // set up bluetooth
   if (name.length() == 0)
     SerialBT.begin("WEIGH-0000");
   else
@@ -127,7 +144,7 @@ extern "C" void app_main() {
   // AT Command (Serial) task
   xTaskCreatePinnedToCore(ATCommandTask, "ATCommand", 2048, NULL, 1, NULL, 1);
   // Serial task
-  xTaskCreatePinnedToCore(SerialTask, "Serial", 1024, NULL, 0, NULL, 0);
+  xTaskCreatePinnedToCore(SerialTask, "Serial", 2048, NULL, 0, NULL, 0);
   // Bluetooth Serial task
   xTaskCreatePinnedToCore(BluetoothServerTask, "Bluetooth", 2048, NULL, 0, NULL, 1);
   
